@@ -1,0 +1,77 @@
+# ============================================================
+# Arbitrage Bot Configuration — Optimized for Nigerian Traders
+# VPS Recommendation: Singapore (AWS ap-southeast-1 / DigitalOcean SGP1)
+#   → ~1-5ms latency to Binance & KuCoin servers
+#   → ~180ms from Lagos — run this bot on a Singapore VPS!
+# ============================================================
+
+bot:
+  mode: paper          # "paper" (simulation) | "live" (real trades)
+  log_level: INFO
+  heartbeat_interval: 30   # seconds
+
+exchanges:
+  binance:
+    enabled: true
+    # Set via .env: BINANCE_API_KEY, BINANCE_API_SECRET
+    testnet: false
+    rate_limit: 1200         # requests/minute (Binance limit)
+    recv_window: 5000        # ms — tighter window = faster rejection of stale orders
+    websocket_reconnect_delay: 1  # seconds
+
+  kucoin:
+    enabled: true
+    # Set via .env: KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_PASSPHRASE
+    testnet: false
+    rate_limit: 1800
+    websocket_reconnect_delay: 1
+
+strategies:
+  triangular:
+    enabled: true
+    exchange: binance
+    # Triangles to scan — ordered by historical profitability for NGN/USD traders
+    triangles:
+      - [USDT, BTC, ETH]     # USDT→BTC→ETH→USDT
+      - [USDT, BTC, BNB]     # USDT→BTC→BNB→USDT
+      - [USDT, BTC, SOL]     # USDT→BTC→SOL→USDT
+      - [USDT, BTC, XRP]     # USDT→BTC→XRP→USDT
+      - [USDT, BTC, ADA]     # USDT→BTC→ADA→USDT
+      - [USDT, ETH, BNB]     # USDT→ETH→BNB→USDT
+      - [USDT, ETH, SOL]     # USDT→ETH→SOL→USDT
+      - [USDT, BNB, SOL]     # USDT→BNB→SOL→USDT
+    min_profit_pct: 0.15     # % profit after fees to trigger a trade
+    trade_amount_usdt: 100   # USDT equivalent per trade cycle
+    max_trade_amount_usdt: 1000
+    fee_rate: 0.001          # 0.1% Binance standard; use 0.00075 with BNB fee discount
+    use_bnb_for_fees: false  # set true if holding BNB and enabled on Binance account
+
+  cross_exchange:
+    enabled: true
+    pairs:
+      - BTC/USDT
+      - ETH/USDT
+      - BNB/USDT
+      - SOL/USDT
+      - XRP/USDT
+    min_profit_pct: 0.3      # higher threshold — accounts for transfer risk/time
+    trade_amount_usdt: 200
+    max_trade_amount_usdt: 2000
+    # Both exchanges must have pre-positioned funds for this strategy
+    # No on-chain transfer is attempted — uses pre-funded balances
+    binance_fee: 0.001
+    kucoin_fee: 0.001
+
+risk:
+  max_daily_loss_usdt: 50       # stop bot for the day if losses exceed this
+  max_drawdown_pct: 5           # % of starting balance — halt if breached
+  max_open_orders: 3
+  order_timeout_seconds: 10     # cancel unfilled orders after this
+  min_balance_usdt: 20          # never trade below this reserve
+  max_position_pct: 30          # max % of balance in a single trade
+
+performance:
+  track_metrics: true
+  report_interval_minutes: 60
+  save_trades_csv: true
+  trades_file: logs/trades.csv
