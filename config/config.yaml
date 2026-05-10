@@ -1,29 +1,32 @@
 # ============================================================
-# Arbitrage Bot — Binance-Only, Auto-Execute
+# Binance Triangular Arbitrage Bot — Auto-Execute
 # ============================================================
-# VPS: Tokyo, Japan (AWS ap-northeast-1 OR Vultr Tokyo HF)
-#   Binance's matching engine runs on AWS Tokyo.
-#   Best value:  Vultr Tokyo High Frequency — ~$24/month, ~2ms to Binance
-#   Best latency: AWS EC2 c5n.large Tokyo    — ~$85/month, sub-1ms
-#   Budget pick:  Contabo VPS Tokyo          — ~$7/month,  ~3-5ms
+# VPS: Tokyo, Japan (Binance matching engine = AWS ap-northeast-1)
+#   Best value:  Vultr Tokyo High Frequency  ~$24/month  ~2ms latency
+#   Best latency: AWS EC2 c5n.large Tokyo    ~$85/month  <1ms latency
+#   Budget:      Contabo VPS Tokyo           ~$7/month   ~4ms latency
+#
+# Nigeria / Binance note:
+#   - Bot runs from Tokyo VPS → Binance's IP-based geo-fencing is bypassed
+#   - Account-level restrictions (if any) are caught at startup
+#   - If running LOCALLY in Nigeria, set BINANCE_PROXY in .env
+#   - Spot trading API (what this bot uses) has NOT been restricted for
+#     Nigerian accounts — only NGN fiat/P2P gateways were affected
 # ============================================================
 
 bot:
-  mode: live          # auto-execute — real trades will be placed
+  mode: live             # auto-execute — real orders
   log_level: INFO
-  heartbeat_interval: 30   # seconds
-  startup_countdown: 5     # seconds to abort before live trading begins
+  heartbeat_interval: 30
+  startup_countdown: 5   # seconds to Ctrl-C before live trading begins
 
 exchanges:
   binance:
-    # Set credentials in .env: BINANCE_API_KEY, BINANCE_API_SECRET
-    recv_window: 5000      # ms — tight window rejects stale orders fast
-    websocket_reconnect_delay: 1   # seconds before WS reconnect attempt
-    # Enable BNB fee discount on your Binance account to use 0.075% fees
-    use_bnb_for_fees: false
+    recv_window: 5000
+    websocket_reconnect_delay: 1
+    # Enable BNB fee discount in your Binance account → set fee_rate to 0.00075
 
 triangular:
-  # Triangles ordered by typical spread/volume on Binance
   triangles:
     - [USDT, BTC, ETH]
     - [USDT, BTC, BNB]
@@ -38,18 +41,49 @@ triangular:
     - [USDT, BNB, SOL]
     - [USDT, BNB, XRP]
 
-  min_profit_pct: 0.12       # % net profit threshold (after all fees)
-  trade_amount_usdt: 100     # USDT per trade cycle
+  min_profit_pct: 0.12       # minimum NET profit % after all fees
+  trade_amount_usdt: 100
   max_trade_amount_usdt: 1000
-  # Standard Binance fee: 0.1% | With BNB discount: 0.075%
-  fee_rate: 0.001
-  order_timeout_seconds: 8   # cancel & abort cycle if a leg hangs
+  fee_rate: 0.001            # 0.1% standard | 0.00075 with BNB discount
+  order_timeout_seconds: 8
 
 risk:
-  max_daily_loss_usdt: 50    # halt for the day if losses hit this
-  max_drawdown_pct: 5        # % of starting balance — halt if breached
-  max_open_orders: 2         # triangular needs 3 legs; keep concurrency low
-  min_balance_usdt: 25       # hard floor — never trade below this
+  # ── Daily limits ────────────────────────────────────────────
+  # Hard stop: bot halts for the rest of the day if total PnL (profit minus
+  # all fees and slippage losses) drops by this amount.
+  # This is NOT just on fees — it's total net loss including slippage.
+  max_daily_loss_usdt: 50
+
+  # Hard stop: halt if balance falls this % below the peak balance seen this session.
+  max_drawdown_pct: 5
+
+  # Fee budget: if the bot pays more than this in Binance fees today, halt.
+  # Prevents the bot from churning trades that collectively cost more than they earn.
+  # Example: fee_rate=0.1% × 3 legs = 0.3% per cycle. At $100/cycle that's $0.30/trade.
+  # 30 trades = $9 in fees. Set this conservatively.
+  max_daily_fees_usdt: 30
+
+  # ── Per-trade cap ────────────────────────────────────────────
+  # Any single triangle cycle that results in a loss larger than this halts the bot.
+  # Protects against catastrophic slippage or partial-fill scenarios.
+  max_loss_per_trade_usdt: 5
+
+  # ── Consecutive loss protection ──────────────────────────────
+  # After this many losses in a row, pause trading for the cooldown period.
+  # This is a WARNING signal — market conditions may have changed.
+  max_consecutive_losses: 3
+  consecutive_loss_cooldown_seconds: 300   # 5 minutes
+
+  # ── Profit/fee safety margin ─────────────────────────────────
+  # Expected profit must be at least this multiple of the fee cost.
+  # With fee=0.1%×3=0.3% total and ratio=1.5, we need profit ≥ 0.45% to trade.
+  # This prevents trading opportunities that only profit after perfect execution
+  # but go negative with any slippage.
+  min_profit_fee_ratio: 1.5
+
+  # ── Position limits ──────────────────────────────────────────
+  max_open_orders: 2
+  min_balance_usdt: 25       # never trade below this reserve
   max_position_pct: 25       # max % of balance per trade cycle
 
 performance:
