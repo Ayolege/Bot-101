@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from typing import Dict, List, Optional
 import ccxt.async_support as ccxt
 import websockets
@@ -11,10 +10,10 @@ from .base import BaseExchange, OrderBook, Balance, Order
 
 class BinanceExchange(BaseExchange):
     """
-    Binance connector.
-    Optimised for Singapore VPS (nearest to Binance's primary cluster).
-    Uses WebSocket streams for sub-millisecond order-book updates and
-    REST only for order placement / account data.
+    Binance spot connector.
+    Designed for Tokyo VPS (co-located with Binance's AWS ap-northeast-1 cluster).
+    Uses WebSocket bookTicker for sub-millisecond order-book updates;
+    REST is used only for order placement and account queries.
     """
 
     WS_BASE = "wss://stream.binance.com:9443/stream"
@@ -23,16 +22,15 @@ class BinanceExchange(BaseExchange):
         super().__init__(config)
         self.name = "binance"
         self._exchange: Optional[ccxt.binance] = None
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._ws_task: Optional[asyncio.Task] = None
-        self._subscribed_symbols: List[str] = []
         self._reconnect_delay = config.get("websocket_reconnect_delay", 1)
 
     async def connect(self) -> None:
+        import os
         self._exchange = ccxt.binance(
             {
-                "apiKey": self.config.get("api_key", ""),
-                "secret": self.config.get("api_secret", ""),
+                "apiKey": os.getenv("BINANCE_API_KEY", ""),
+                "secret": os.getenv("BINANCE_API_SECRET", ""),
                 "enableRateLimit": True,
                 "options": {
                     "recvWindow": self.config.get("recv_window", 5000),
@@ -42,13 +40,15 @@ class BinanceExchange(BaseExchange):
         )
         await self._exchange.load_markets()
         self._connected = True
-        logger.info("[Binance] Connected via REST. Markets loaded.")
+        logger.info("[Binance] Connected. Markets loaded.")
 
     async def disconnect(self) -> None:
         if self._ws_task:
             self._ws_task.cancel()
-        if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
         if self._exchange:
             await self._exchange.close()
         self._connected = False
@@ -93,7 +93,7 @@ class BinanceExchange(BaseExchange):
             await self._exchange.cancel_order(order_id, symbol)
             return True
         except Exception as e:
-            logger.error(f"[Binance] Cancel order {order_id} failed: {e}")
+            logger.error(f"[Binance] Cancel {order_id} failed: {e}")
             return False
 
     async def fetch_order(self, order_id: str, symbol: str) -> Order:
@@ -101,17 +101,14 @@ class BinanceExchange(BaseExchange):
         return self._parse_order(raw)
 
     async def subscribe_order_books(self, symbols: List[str]) -> None:
-        """Subscribe to Binance combined WebSocket stream for order-book top-of-book."""
-        self._subscribed_symbols = symbols
         self._ws_task = asyncio.create_task(self._ws_loop(symbols))
-        logger.info(f"[Binance] WebSocket subscription started for {len(symbols)} symbols.")
+        logger.info(f"[Binance] WebSocket subscribing to {len(symbols)} symbols.")
 
     async def _ws_loop(self, symbols: List[str]) -> None:
         streams = "/".join(
             f"{s.replace('/', '').lower()}@bookTicker" for s in symbols
         )
         url = f"{self.WS_BASE}?streams={streams}"
-
         while True:
             try:
                 async with websockets.connect(
@@ -120,23 +117,21 @@ class BinanceExchange(BaseExchange):
                     ping_timeout=10,
                     close_timeout=5,
                 ) as ws:
-                    self._ws = ws
                     logger.info("[Binance] WebSocket connected.")
                     async for raw in ws:
                         self._handle_book_ticker(json.loads(raw))
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"[Binance] WebSocket error: {e}. Reconnecting in {self._reconnect_delay}s…")
+                logger.warning(
+                    f"[Binance] WebSocket error: {e}. "
+                    f"Reconnecting in {self._reconnect_delay}s…"
+                )
                 await asyncio.sleep(self._reconnect_delay)
 
     def _handle_book_ticker(self, msg: dict) -> None:
-        """
-        bookTicker payload: {"stream":"ethbtc@bookTicker","data":{"u":...,"s":"ETHBTC","b":"bid","B":"bidQty","a":"ask","A":"askQty"}}
-        """
         data = msg.get("data", msg)
         raw_symbol = data.get("s", "")
-        # Normalise "ETHBTC" → "ETH/BTC"
         symbol = self._normalise_symbol(raw_symbol)
         if not symbol:
             return
@@ -144,26 +139,22 @@ class BinanceExchange(BaseExchange):
         bid_qty = float(data.get("B", 0))
         ask_price = float(data.get("a", 0))
         ask_qty = float(data.get("A", 0))
-
-        self.order_books[symbol] = OrderBook(
-            symbol=symbol,
-            exchange=self.name,
-            bids=[(bid_price, bid_qty)] if bid_price else [],
-            asks=[(ask_price, ask_qty)] if ask_price else [],
-        )
+        if bid_price and ask_price:
+            self.order_books[symbol] = OrderBook(
+                symbol=symbol,
+                exchange=self.name,
+                bids=[(bid_price, bid_qty)],
+                asks=[(ask_price, ask_qty)],
+            )
 
     def _normalise_symbol(self, raw: str) -> Optional[str]:
-        """Convert "ETHBTC" → "ETH/BTC" using loaded markets."""
         if self._exchange and self._exchange.markets:
             for sym, mkt in self._exchange.markets.items():
                 if mkt.get("id", "").upper() == raw.upper():
                     return sym
-        # Fallback heuristics for common pairs
-        quote_currencies = ["USDT", "BTC", "ETH", "BNB", "BUSD"]
-        for q in quote_currencies:
+        for q in ["USDT", "BTC", "ETH", "BNB", "BUSD"]:
             if raw.endswith(q):
-                base = raw[: -len(q)]
-                return f"{base}/{q}"
+                return f"{raw[:-len(q)]}/{q}"
         return None
 
     def _parse_order(self, raw: dict) -> Order:
@@ -177,5 +168,5 @@ class BinanceExchange(BaseExchange):
             status=raw.get("status", "open"),
             filled=float(raw.get("filled") or 0),
             cost=float(raw.get("cost") or 0),
-            fee=float(raw.get("fee", {}).get("cost") or 0) if raw.get("fee") else 0.0,
+            fee=float(raw["fee"]["cost"]) if raw.get("fee") else 0.0,
         )

@@ -1,77 +1,58 @@
 # ============================================================
-# Arbitrage Bot Configuration — Optimized for Nigerian Traders
-# VPS Recommendation: Singapore (AWS ap-southeast-1 / DigitalOcean SGP1)
-#   → ~1-5ms latency to Binance & KuCoin servers
-#   → ~180ms from Lagos — run this bot on a Singapore VPS!
+# Arbitrage Bot — Binance-Only, Auto-Execute
+# ============================================================
+# VPS: Tokyo, Japan (AWS ap-northeast-1 OR Vultr Tokyo HF)
+#   Binance's matching engine runs on AWS Tokyo.
+#   Best value:  Vultr Tokyo High Frequency — ~$24/month, ~2ms to Binance
+#   Best latency: AWS EC2 c5n.large Tokyo    — ~$85/month, sub-1ms
+#   Budget pick:  Contabo VPS Tokyo          — ~$7/month,  ~3-5ms
 # ============================================================
 
 bot:
-  mode: paper          # "paper" (simulation) | "live" (real trades)
+  mode: live          # auto-execute — real trades will be placed
   log_level: INFO
   heartbeat_interval: 30   # seconds
+  startup_countdown: 5     # seconds to abort before live trading begins
 
 exchanges:
   binance:
-    enabled: true
-    # Set via .env: BINANCE_API_KEY, BINANCE_API_SECRET
-    testnet: false
-    rate_limit: 1200         # requests/minute (Binance limit)
-    recv_window: 5000        # ms — tighter window = faster rejection of stale orders
-    websocket_reconnect_delay: 1  # seconds
+    # Set credentials in .env: BINANCE_API_KEY, BINANCE_API_SECRET
+    recv_window: 5000      # ms — tight window rejects stale orders fast
+    websocket_reconnect_delay: 1   # seconds before WS reconnect attempt
+    # Enable BNB fee discount on your Binance account to use 0.075% fees
+    use_bnb_for_fees: false
 
-  kucoin:
-    enabled: true
-    # Set via .env: KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_PASSPHRASE
-    testnet: false
-    rate_limit: 1800
-    websocket_reconnect_delay: 1
+triangular:
+  # Triangles ordered by typical spread/volume on Binance
+  triangles:
+    - [USDT, BTC, ETH]
+    - [USDT, BTC, BNB]
+    - [USDT, BTC, SOL]
+    - [USDT, BTC, XRP]
+    - [USDT, BTC, ADA]
+    - [USDT, BTC, DOGE]
+    - [USDT, BTC, LTC]
+    - [USDT, ETH, BNB]
+    - [USDT, ETH, SOL]
+    - [USDT, ETH, MATIC]
+    - [USDT, BNB, SOL]
+    - [USDT, BNB, XRP]
 
-strategies:
-  triangular:
-    enabled: true
-    exchange: binance
-    # Triangles to scan — ordered by historical profitability for NGN/USD traders
-    triangles:
-      - [USDT, BTC, ETH]     # USDT→BTC→ETH→USDT
-      - [USDT, BTC, BNB]     # USDT→BTC→BNB→USDT
-      - [USDT, BTC, SOL]     # USDT→BTC→SOL→USDT
-      - [USDT, BTC, XRP]     # USDT→BTC→XRP→USDT
-      - [USDT, BTC, ADA]     # USDT→BTC→ADA→USDT
-      - [USDT, ETH, BNB]     # USDT→ETH→BNB→USDT
-      - [USDT, ETH, SOL]     # USDT→ETH→SOL→USDT
-      - [USDT, BNB, SOL]     # USDT→BNB→SOL→USDT
-    min_profit_pct: 0.15     # % profit after fees to trigger a trade
-    trade_amount_usdt: 100   # USDT equivalent per trade cycle
-    max_trade_amount_usdt: 1000
-    fee_rate: 0.001          # 0.1% Binance standard; use 0.00075 with BNB fee discount
-    use_bnb_for_fees: false  # set true if holding BNB and enabled on Binance account
-
-  cross_exchange:
-    enabled: true
-    pairs:
-      - BTC/USDT
-      - ETH/USDT
-      - BNB/USDT
-      - SOL/USDT
-      - XRP/USDT
-    min_profit_pct: 0.3      # higher threshold — accounts for transfer risk/time
-    trade_amount_usdt: 200
-    max_trade_amount_usdt: 2000
-    # Both exchanges must have pre-positioned funds for this strategy
-    # No on-chain transfer is attempted — uses pre-funded balances
-    binance_fee: 0.001
-    kucoin_fee: 0.001
+  min_profit_pct: 0.12       # % net profit threshold (after all fees)
+  trade_amount_usdt: 100     # USDT per trade cycle
+  max_trade_amount_usdt: 1000
+  # Standard Binance fee: 0.1% | With BNB discount: 0.075%
+  fee_rate: 0.001
+  order_timeout_seconds: 8   # cancel & abort cycle if a leg hangs
 
 risk:
-  max_daily_loss_usdt: 50       # stop bot for the day if losses exceed this
-  max_drawdown_pct: 5           # % of starting balance — halt if breached
-  max_open_orders: 3
-  order_timeout_seconds: 10     # cancel unfilled orders after this
-  min_balance_usdt: 20          # never trade below this reserve
-  max_position_pct: 30          # max % of balance in a single trade
+  max_daily_loss_usdt: 50    # halt for the day if losses hit this
+  max_drawdown_pct: 5        # % of starting balance — halt if breached
+  max_open_orders: 2         # triangular needs 3 legs; keep concurrency low
+  min_balance_usdt: 25       # hard floor — never trade below this
+  max_position_pct: 25       # max % of balance per trade cycle
 
 performance:
-  track_metrics: true
   report_interval_minutes: 60
   save_trades_csv: true
   trades_file: logs/trades.csv
