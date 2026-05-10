@@ -62,13 +62,32 @@ class ArbitrageBot:
         await self.binance.connect()
         await self.binance.fetch_balances()
         usdt = self.binance.get_balance("USDT")
-        logger.info(f"[Bot] Binance USDT balance: {usdt:.2f}")
-        if usdt < self.cfg["risk"]["min_balance_usdt"]:
+        min_bal = self.cfg["risk"]["min_balance_usdt"]
+        trade_amt = self.cfg["triangular"]["trade_amount_usdt"]
+
+        logger.info(f"[Bot] Binance USDT balance: ${usdt:.2f}")
+
+        if usdt < min_bal:
             raise RuntimeError(
-                f"Insufficient balance: {usdt:.2f} USDT "
-                f"(minimum {self.cfg['risk']['min_balance_usdt']} USDT required)"
+                f"Balance ${usdt:.2f} is below the minimum reserve of ${min_bal}. "
+                "Top up your Binance USDT balance and restart."
             )
+
+        if usdt < trade_amt + min_bal:
+            logger.warning(
+                f"[Bot] Balance ${usdt:.2f} is tight. "
+                f"Recommended minimum for this config: ${trade_amt + min_bal:.0f} "
+                f"(${trade_amt} trade + ${min_bal} reserve). "
+                "Bot will trade with reduced size."
+            )
+
         self.risk.set_starting_balance(usdt)
+        logger.info(
+            f"[Bot] Capital: ${usdt:.2f} | "
+            f"Trade size: ${trade_amt} | "
+            f"Daily loss limit: ${self.cfg['risk']['max_daily_loss_usdt']} | "
+            f"Fee budget: ${self.cfg['risk']['max_daily_fees_usdt']}/day"
+        )
 
     async def _init_strategy(self) -> None:
         tri_cfg = self.cfg["triangular"]

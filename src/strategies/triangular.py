@@ -62,9 +62,10 @@ class TriangularStrategy:
         self.cfg = config
         self.risk = risk
         self.fee = config.get("fee_rate", 0.001)
-        self.min_profit = config.get("min_profit_pct", 0.12)
-        self.base_amount = config.get("trade_amount_usdt", 100)
+        self.min_profit = config.get("min_profit_pct", 0.5)
+        self.base_amount = config.get("trade_amount_usdt", 15)
         self.order_timeout = config.get("order_timeout_seconds", 8)
+        self.min_notional = config.get("min_notional_usdt", 6)   # Binance rejects < ~$5
         self.triangles = [tuple(t) for t in config.get("triangles", [])]
 
         self._opportunities_found = 0
@@ -113,6 +114,18 @@ class TriangularStrategy:
 
         amount = self.risk.safe_trade_amount(self.base_amount, self._usdt_balance())
         if amount <= 0:
+            return None
+
+        # Validate all three legs will clear Binance's minimum notional (~$5)
+        # Leg 1: amount USDT → direct
+        # Leg 2: amount / ask_ba in MID → notional in MID terms = amount / ask_ba × ask_cb (in BASE)
+        # Leg 3: amount / ask_ba / ask_cb in QUOTE → notional ≈ amount (back to base)
+        leg2_notional_approx = (amount / ask_ba) * ask_cb  # roughly in USDT equivalent via BTC/ETH
+        if amount < self.min_notional or leg2_notional_approx < self.min_notional / ask_ba:
+            logger.debug(
+                f"[Triangular] {a}→{b}→{c}: trade size ${amount:.2f} may hit "
+                f"Binance minimum notional — skipping"
+            )
             return None
 
         fees = self.risk.estimate_fees(amount, self.fee, legs=3)

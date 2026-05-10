@@ -1,90 +1,94 @@
 # ============================================================
-# Binance Triangular Arbitrage Bot — Auto-Execute
+# Binance Triangular Arbitrage Bot — $50 Starting Capital
 # ============================================================
 # VPS: Tokyo, Japan (Binance matching engine = AWS ap-northeast-1)
 #   Best value:  Vultr Tokyo High Frequency  ~$24/month  ~2ms latency
 #   Best latency: AWS EC2 c5n.large Tokyo    ~$85/month  <1ms latency
-#   Budget:      Contabo VPS Tokyo           ~$7/month   ~4ms latency
+#   Budget start: Contabo VPS Tokyo          ~$7/month   ~4ms latency
 #
-# Nigeria / Binance note:
-#   - Bot runs from Tokyo VPS → Binance's IP-based geo-fencing is bypassed
-#   - Account-level restrictions (if any) are caught at startup
-#   - If running LOCALLY in Nigeria, set BINANCE_PROXY in .env
-#   - Spot trading API (what this bot uses) has NOT been restricted for
-#     Nigerian accounts — only NGN fiat/P2P gateways were affected
+# $50 capital math:
+#   Trade size  : $15 per cycle
+#   Fee per cycle: 0.1% × 3 legs = 0.3% = $0.045 on $15
+#   Min profit  : 0.5% of $15 = $0.075 per successful trade
+#   Daily target: ~$0.50–$2.00 (1–4% daily, realistic range)
+#   Daily limit : $5 max loss (10% of capital)
 # ============================================================
 
 bot:
-  mode: live             # auto-execute — real orders
+  mode: live
   log_level: INFO
   heartbeat_interval: 30
-  startup_countdown: 5   # seconds to Ctrl-C before live trading begins
+  startup_countdown: 5
 
 exchanges:
   binance:
     recv_window: 5000
     websocket_reconnect_delay: 1
-    # Enable BNB fee discount in your Binance account → set fee_rate to 0.00075
+    # IMPORTANT: Enable BNB fee discount → reduces fee to 0.075%/leg
+    # Total with BNB: 0.075% × 3 = 0.225% vs 0.3% standard
+    # On $15 trade: saves $0.011 per cycle — significant at this size
 
 triangular:
+  # Triangles selected for $50 capital:
+  # - Must clear Binance's $5 minimum notional per leg
+  # - High-volume pairs for tighter spreads
+  # - Lower per-unit price assets (XRP, ADA, DOGE) give
+  #   cleaner quantity rounding at small sizes
   triangles:
     - [USDT, BTC, ETH]
-    - [USDT, BTC, BNB]
-    - [USDT, BTC, SOL]
     - [USDT, BTC, XRP]
     - [USDT, BTC, ADA]
     - [USDT, BTC, DOGE]
-    - [USDT, BTC, LTC]
     - [USDT, ETH, BNB]
-    - [USDT, ETH, SOL]
-    - [USDT, ETH, MATIC]
-    - [USDT, BNB, SOL]
+    - [USDT, ETH, XRP]
     - [USDT, BNB, XRP]
+    - [USDT, BNB, ADA]
 
-  min_profit_pct: 0.12       # minimum NET profit % after all fees
-  trade_amount_usdt: 100
-  max_trade_amount_usdt: 1000
-  fee_rate: 0.001            # 0.1% standard | 0.00075 with BNB discount
+  # With $50 capital:
+  # $15 trade × 0.3% fees × 3 legs = $0.045 in fees
+  # min_profit_pct=0.5% → $0.075 expected profit per cycle
+  # safety ratio 1.5× means we need 0.45% to even consider trading
+  # These filters combined mean we only trade when spread ≥ ~0.75%
+  min_profit_pct: 0.5
+  trade_amount_usdt: 15
+  max_trade_amount_usdt: 20
+  fee_rate: 0.001         # 0.1% standard | set 0.00075 with BNB discount
   order_timeout_seconds: 8
+  min_notional_usdt: 6    # hard floor per leg — Binance rejects below ~$5
 
 risk:
-  # ── Daily limits ────────────────────────────────────────────
-  # Hard stop: bot halts for the rest of the day if total PnL (profit minus
-  # all fees and slippage losses) drops by this amount.
-  # This is NOT just on fees — it's total net loss including slippage.
-  max_daily_loss_usdt: 50
+  # ── Daily limits (scaled to $50 capital) ─────────────────────
+  # $5 = 10% of capital. Losing 10% in one day = stop, reassess.
+  max_daily_loss_usdt: 5
 
-  # Hard stop: halt if balance falls this % below the peak balance seen this session.
-  max_drawdown_pct: 5
+  # Halt if balance falls 10% below the highest balance seen this session.
+  # Protects against a slow bleed that daily loss limit might miss.
+  max_drawdown_pct: 10
 
-  # Fee budget: if the bot pays more than this in Binance fees today, halt.
-  # Prevents the bot from churning trades that collectively cost more than they earn.
-  # Example: fee_rate=0.1% × 3 legs = 0.3% per cycle. At $100/cycle that's $0.30/trade.
-  # 30 trades = $9 in fees. Set this conservatively.
-  max_daily_fees_usdt: 30
+  # Fee budget: $0.045/cycle × ~66 cycles max = $3 in fees.
+  # If fees hit $3 before profit does, the market is not giving
+  # opportunities — stop churning and wait.
+  max_daily_fees_usdt: 3
 
-  # ── Per-trade cap ────────────────────────────────────────────
-  # Any single triangle cycle that results in a loss larger than this halts the bot.
-  # Protects against catastrophic slippage or partial-fill scenarios.
-  max_loss_per_trade_usdt: 5
+  # ── Per-trade cap ─────────────────────────────────────────────
+  # Worst-case loss from one bad cycle (slippage + recovery order).
+  # $1 = 2% of $50 capital. Any single trade losing more halts the bot.
+  max_loss_per_trade_usdt: 1
 
-  # ── Consecutive loss protection ──────────────────────────────
-  # After this many losses in a row, pause trading for the cooldown period.
-  # This is a WARNING signal — market conditions may have changed.
+  # ── Consecutive loss cool-down ────────────────────────────────
   max_consecutive_losses: 3
-  consecutive_loss_cooldown_seconds: 300   # 5 minutes
+  consecutive_loss_cooldown_seconds: 300   # 5-minute pause after 3 losses
 
-  # ── Profit/fee safety margin ─────────────────────────────────
-  # Expected profit must be at least this multiple of the fee cost.
-  # With fee=0.1%×3=0.3% total and ratio=1.5, we need profit ≥ 0.45% to trade.
-  # This prevents trading opportunities that only profit after perfect execution
-  # but go negative with any slippage.
+  # ── Profit/fee safety margin ──────────────────────────────────
+  # Profit must be ≥ 1.5× total fee cost.
+  # fee=0.3% (3 legs), so required profit ≥ 0.45% before we trade.
+  # Combined with min_profit_pct=0.5%, effective threshold is 0.5%.
   min_profit_fee_ratio: 1.5
 
-  # ── Position limits ──────────────────────────────────────────
-  max_open_orders: 2
-  min_balance_usdt: 25       # never trade below this reserve
-  max_position_pct: 25       # max % of balance per trade cycle
+  # ── Position limits ───────────────────────────────────────────
+  max_open_orders: 1        # only one cycle at a time at $50 scale
+  min_balance_usdt: 10      # never trade if balance drops below $10
+  max_position_pct: 35      # max 35% of balance per cycle = ~$17.50 on $50
 
 performance:
   report_interval_minutes: 60
