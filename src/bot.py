@@ -1,9 +1,11 @@
 import asyncio
 import time
 from typing import Optional
+
 from loguru import logger
 
 from src.exchanges.binance import BinanceExchange
+from src.strategies.discovery import discover_triangles, triangles_to_symbols
 from src.strategies.triangular import TriangularStrategy
 from src.risk.manager import RiskManager
 from src.utils.performance import PerformanceTracker
@@ -13,10 +15,13 @@ from src.utils.notifier import TelegramNotifier
 class ArbitrageBot:
     """
     Binance-only triangular arbitrage bot.
-    Runs a tight async scan loop — designed for Tokyo VPS
-    (co-located with Binance's AWS ap-northeast-1 cluster).
-    Auto-executes all opportunities that clear the profit threshold
-    and pass risk checks.
+
+    Startup sequence:
+      1. Connect to Binance REST + verify account permissions
+      2. Auto-discover all valid liquid USDT triangles
+      3. Subscribe to WebSocket bookTicker for all required symbols
+      4. Run scan loop — checks every discovered triangle every 10ms
+      5. Auto-execute whenever profit + risk checks pass
     """
 
     def __init__(self, config: dict):
@@ -36,12 +41,11 @@ class ArbitrageBot:
         )
 
     async def start(self) -> None:
-        logger.info("[Bot] Initialising Binance connection…")
+        logger.info("[Bot] Initialising…")
         await self._init_exchange()
         await self._init_strategy()
-
         self._running = True
-        logger.info("[Bot] Auto-execute loop started.")
+        logger.info("[Bot] Auto-execute scan loop started.")
         await asyncio.gather(
             self._scan_loop(),
             self._housekeeping_loop(),
@@ -56,11 +60,14 @@ class ArbitrageBot:
         logger.info(report)
         await self.notifier.send(f"Bot stopped.\n{report}")
 
+    # ── Initialisation ────────────────────────────────────────
+
     async def _init_exchange(self) -> None:
         cfg = self.cfg["exchanges"]["binance"]
         self.binance = BinanceExchange(cfg)
         await self.binance.connect()
         await self.binance.fetch_balances()
+
         usdt = self.binance.get_balance("USDT")
         min_bal = self.cfg["risk"]["min_balance_usdt"]
         trade_amt = self.cfg["triangular"]["trade_amount_usdt"]
@@ -69,48 +76,103 @@ class ArbitrageBot:
 
         if usdt < min_bal:
             raise RuntimeError(
-                f"Balance ${usdt:.2f} is below the minimum reserve of ${min_bal}. "
-                "Top up your Binance USDT balance and restart."
+                f"Balance ${usdt:.2f} is below the ${min_bal} reserve minimum. "
+                "Top up your Binance USDT spot balance and restart."
             )
 
         if usdt < trade_amt + min_bal:
             logger.warning(
-                f"[Bot] Balance ${usdt:.2f} is tight. "
-                f"Recommended minimum for this config: ${trade_amt + min_bal:.0f} "
+                f"[Bot] Tight balance: ${usdt:.2f}. "
+                f"Recommended: ${trade_amt + min_bal:.0f} "
                 f"(${trade_amt} trade + ${min_bal} reserve). "
                 "Bot will trade with reduced size."
             )
 
         self.risk.set_starting_balance(usdt)
         logger.info(
-            f"[Bot] Capital: ${usdt:.2f} | "
-            f"Trade size: ${trade_amt} | "
-            f"Daily loss limit: ${self.cfg['risk']['max_daily_loss_usdt']} | "
-            f"Fee budget: ${self.cfg['risk']['max_daily_fees_usdt']}/day"
+            f"[Bot] Capital=${usdt:.2f} | "
+            f"TradeSize=${trade_amt} | "
+            f"DailyLossLimit=${self.cfg['risk']['max_daily_loss_usdt']} | "
+            f"FeeBudget=${self.cfg['risk']['max_daily_fees_usdt']}/day"
         )
 
     async def _init_strategy(self) -> None:
         tri_cfg = self.cfg["triangular"]
-        # Build the full symbol set needed across all triangles
-        symbols: set[str] = set()
-        for t in tri_cfg.get("triangles", []):
-            a, b, c = t
-            symbols.update([f"{b}/{a}", f"{c}/{b}", f"{c}/{a}"])
+        disc_cfg = self.cfg.get("discovery", {})
 
-        await self.binance.subscribe_order_books(list(symbols))
-        # Warm-up: let WebSocket populate order books before scanning
-        logger.info(f"[Bot] Warming up order books ({len(symbols)} symbols)…")
+        # ── Triangle discovery ─────────────────────────────────
+        manual = tri_cfg.get("triangles", [])
+        auto_discover = tri_cfg.get("auto_discover", True)
+
+        if auto_discover:
+            triangles = await discover_triangles(
+                exchange=self.binance,
+                min_volume_usdt=disc_cfg.get("min_pair_volume_usdt", 500_000),
+                max_triangles=disc_cfg.get("max_triangles", 300),
+                bridge_currencies=disc_cfg.get("bridge_currencies", ["BTC", "ETH", "BNB"]),
+            )
+            # Prepend any manually specified triangles (in config) as overrides
+            if manual:
+                from src.strategies.discovery import TriangleMeta
+                manual_metas = []
+                existing_paths = {(t.mid, t.quote) for t in triangles}
+                for t in manual:
+                    a, b, c = t
+                    if (b, c) not in existing_paths:
+                        manual_metas.append(
+                            TriangleMeta(
+                                base=a, mid=b, quote=c,
+                                sym_mid_base=f"{b}/{a}",
+                                sym_quote_mid=f"{c}/{b}",
+                                sym_quote_base=f"{c}/{a}",
+                                min_volume_usdt=0,
+                            )
+                        )
+                triangles = manual_metas + triangles
+        else:
+            # Manual-only mode — build TriangleMeta from config list
+            from src.strategies.discovery import TriangleMeta
+            triangles = [
+                TriangleMeta(
+                    base=t[0], mid=t[1], quote=t[2],
+                    sym_mid_base=f"{t[1]}/{t[0]}",
+                    sym_quote_mid=f"{t[2]}/{t[1]}",
+                    sym_quote_base=f"{t[2]}/{t[0]}",
+                    min_volume_usdt=0,
+                )
+                for t in manual
+            ]
+
+        if not triangles:
+            raise RuntimeError(
+                "[Bot] No triangles discovered. "
+                "Check min_pair_volume_usdt or add manual triangles."
+            )
+
+        # ── WebSocket subscription ─────────────────────────────
+        symbols = triangles_to_symbols(triangles)
+        logger.info(
+            f"[Bot] Subscribing to {len(symbols)} symbols "
+            f"for {len(triangles)} triangles…"
+        )
+        await self.binance.subscribe_order_books(symbols)
+
+        # Warm-up: let WebSocket populate order books
+        logger.info("[Bot] Warming up order books (3s)…")
         await asyncio.sleep(3)
 
         self.strategy = TriangularStrategy(
             exchange=self.binance,
+            triangles=triangles,
             config=tri_cfg,
             risk=self.risk,
         )
         logger.info(
-            f"[Bot] Strategy ready — {len(tri_cfg.get('triangles', []))} triangles, "
-            f"{len(symbols)} symbols"
+            f"[Bot] Ready — scanning {len(triangles)} triangles "
+            f"across {len(symbols)} symbols."
         )
+
+    # ── Loops ─────────────────────────────────────────────────
 
     async def _scan_loop(self) -> None:
         while self._running:
@@ -119,39 +181,46 @@ class ArbitrageBot:
                 continue
 
             if self.strategy:
-                for opp in self.strategy.scan():
-                    logger.info(f"[Bot] Opportunity: {opp}")
+                opportunities = self.strategy.scan()
+                if opportunities:
+                    # Execute the single best opportunity per tick
+                    # (prevents concurrent cycles fighting over the same balance)
+                    best = opportunities[0]
+                    logger.info(f"[Bot] Opportunity: {best}")
                     await self.notifier.alert_trade(
-                        "triangular", opp.expected_profit_usdt, str(opp)
+                        "triangular", best.expected_profit_usdt, str(best)
                     )
-                    asyncio.create_task(self.strategy.execute(opp))
+                    asyncio.create_task(self.strategy.execute(best))
 
             self._scan_count += 1
-            await asyncio.sleep(0.01)   # yield to event loop
+            await asyncio.sleep(0.01)   # 100 scans/second
 
     async def _housekeeping_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self.cfg["bot"].get("heartbeat_interval", 30))
 
-            # Refresh balance
             try:
                 await self.binance.fetch_balances()
             except Exception as e:
                 logger.warning(f"[Bot] Balance refresh error: {e}")
 
-            # Periodic report
             if time.time() - self._last_report >= self._report_interval:
                 report = self.perf.report()
                 logger.info(report)
                 await self.notifier.send(report)
                 self._last_report = time.time()
 
-            # Midnight daily PnL reset
             if time.localtime().tm_hour == 0 and time.localtime().tm_min == 0:
                 self.risk.reset_daily()
 
             if self.risk.state.halted:
                 await self.notifier.alert_halt(self.risk.state.halt_reason)
 
-            risk_summary = self.risk.summary()
-            logger.debug(f"[Bot] Heartbeat | scans={self._scan_count} | {risk_summary}")
+            stats = self.strategy.stats() if self.strategy else {}
+            risk = self.risk.summary()
+            logger.debug(
+                f"[Bot] Heartbeat | scans={self._scan_count} | "
+                f"triangles={stats.get('triangles_active', 0)} | "
+                f"trades={stats.get('trades_executed', 0)} | "
+                f"pnl={risk.get('daily_pnl_usdt', 0):.4f} USDT"
+            )
