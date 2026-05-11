@@ -35,9 +35,12 @@ exchanges:
 #   $500 capital → min_pair_volume_usdt: 1_000_000
 #   $5k  capital → min_pair_volume_usdt: 5_000_000
 discovery:
-  min_pair_volume_usdt: 500_000   # min 24h USDT volume per pair
-  max_triangles: 300              # cap — well within WS stream limits
-  bridge_currencies:              # assets used as the MID leg
+  # $250k daily volume floor discovers ~50% more triangles than $500k
+  # while keeping pairs liquid enough for $15 trade sizes.
+  # Typical result: 150-250 triangles vs ~100 at $500k floor.
+  min_pair_volume_usdt: 250_000   # min 24h USDT volume per pair
+  max_triangles: 300              # cap — well within Binance's 1024 WS stream limit
+  bridge_currencies:              # MID leg currencies (most cross-pair coverage)
     - BTC
     - ETH
     - BNB
@@ -54,7 +57,10 @@ triangular:
   #   min_profit_pct=0.5% means we need a 0.5% NET spread to trade.
   #   Combined with min_profit_fee_ratio=1.5 (profit ≥ 1.5× fees),
   #   the effective entry is max(0.5%, 0.45%) = 0.5%.
-  min_profit_pct: 0.5
+  # 0.6% = 0.3% fees + 0.15% slippage buffer + 0.15% profit margin.
+  # Raising from 0.5% → 0.6% ensures we don't trade opportunities that
+  # look profitable on paper but go negative with real-world slippage.
+  min_profit_pct: 0.6
   trade_amount_usdt: 15
   max_trade_amount_usdt: 20
   fee_rate: 0.001         # 0.1% standard | 0.00075 with BNB fee discount

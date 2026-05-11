@@ -54,7 +54,11 @@ class BinanceExchange(BaseExchange):
         self._exchange: Optional[ccxt.binance] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._reconnect_delay = config.get("websocket_reconnect_delay", 1)
-        self._verified_markets: set[str] = set()  # pairs confirmed tradeable on this account
+        self._verified_markets: set[str] = set()
+        # O(1) symbol lookup: "ETHBTC" → "ETH/BTC"
+        # Built once at connect; eliminates the O(N) market scan that ran
+        # on every single WebSocket message (10 000+ times/second on a live bot).
+        self._symbol_cache: Dict[str, str] = {}
 
     async def connect(self) -> None:
         proxy = os.getenv("BINANCE_PROXY", "")
@@ -75,6 +79,13 @@ class BinanceExchange(BaseExchange):
 
         try:
             await self._exchange.load_markets()
+            # Build O(1) symbol lookup from exchange ID → ccxt symbol
+            self._symbol_cache = {
+                mkt["id"].upper(): sym
+                for sym, mkt in self._exchange.markets.items()
+                if "id" in mkt
+            }
+            logger.debug(f"[Binance] Symbol cache built: {len(self._symbol_cache)} entries.")
         except ccxt.AuthenticationError as e:
             raise RuntimeError(
                 f"[Binance] Authentication failed — check BINANCE_API_KEY and "
@@ -258,11 +269,13 @@ class BinanceExchange(BaseExchange):
             )
 
     def _normalise_symbol(self, raw: str) -> Optional[str]:
-        if self._exchange and self._exchange.markets:
-            for sym, mkt in self._exchange.markets.items():
-                if mkt.get("id", "").upper() == raw.upper():
-                    return sym
-        for q in ["USDT", "BTC", "ETH", "BNB", "BUSD"]:
+        # O(1) cache lookup — built at connect time from all loaded markets.
+        # Replaces the previous O(N) loop over all markets per message.
+        result = self._symbol_cache.get(raw.upper())
+        if result:
+            return result
+        # Fallback heuristic for any symbol not in cache
+        for q in ("USDT", "BTC", "ETH", "BNB"):
             if raw.endswith(q):
                 return f"{raw[:-len(q)]}/{q}"
         return None

@@ -22,7 +22,7 @@ class TelegramNotifier:
                     if resp.status != 200:
                         logger.warning(f"[Telegram] Send failed: {await resp.text()}")
         except Exception as e:
-            logger.debug(f"[Telegram] Notification error: {e}")
+            logger.warning(f"[Telegram] Notification failed: {e}")
 
     async def alert_trade(self, strategy: str, profit: float, detail: str) -> None:
         emoji = "✅" if profit > 0 else "⚠️"

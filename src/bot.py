@@ -39,6 +39,9 @@ class ArbitrageBot:
         self._report_interval = (
             config["performance"].get("report_interval_minutes", 60) * 60
         )
+        # Date-based daily reset — avoids the race where a trade that completes
+        # at 00:00:01 has its PnL wiped by a reset triggered at the same second.
+        self._last_reset_date: str = ""
 
     async def start(self) -> None:
         logger.info("[Bot] Initialising…")
@@ -183,17 +186,21 @@ class ArbitrageBot:
             if self.strategy:
                 opportunities = self.strategy.scan()
                 if opportunities:
-                    # Execute the single best opportunity per tick
-                    # (prevents concurrent cycles fighting over the same balance)
                     best = opportunities[0]
                     logger.info(f"[Bot] Opportunity: {best}")
                     await self.notifier.alert_trade(
                         "triangular", best.expected_profit_usdt, str(best)
                     )
+                    # create_task: non-blocking — scan continues immediately.
+                    # The semaphore inside execute() enforces max_open_orders.
                     asyncio.create_task(self.strategy.execute(best))
 
             self._scan_count += 1
-            await asyncio.sleep(0.01)   # 100 scans/second
+            # asyncio.sleep(0) yields to the event loop (lets WebSocket messages
+            # process) without any artificial delay — maximum scan throughput.
+            # The _has_new_data filter in scan() keeps CPU low by skipping
+            # triangles whose order books haven't changed since last evaluation.
+            await asyncio.sleep(0)
 
     async def _housekeeping_loop(self) -> None:
         while self._running:
@@ -210,8 +217,12 @@ class ArbitrageBot:
                 await self.notifier.send(report)
                 self._last_report = time.time()
 
-            if time.localtime().tm_hour == 0 and time.localtime().tm_min == 0:
+            # Date-based daily reset — safe against the midnight race where a
+            # trade completing at 00:00:01 would have its PnL wiped immediately.
+            today = time.strftime("%Y-%m-%d")
+            if self._last_reset_date and self._last_reset_date != today:
                 self.risk.reset_daily()
+            self._last_reset_date = today
 
             if self.risk.state.halted:
                 await self.notifier.alert_halt(self.risk.state.halt_reason)

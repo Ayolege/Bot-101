@@ -11,39 +11,60 @@ def round_down(value: float, decimals: int) -> float:
 
 
 def pct_profit(buy_price: float, sell_price: float, fee_rate: float) -> float:
-    """Net profit % after fees on both legs."""
     effective_sell = sell_price * (1 - fee_rate)
     effective_buy = buy_price * (1 + fee_rate)
     return ((effective_sell - effective_buy) / effective_buy) * 100
 
 
-def triangle_profit(
-    rate_ab: float,
-    rate_bc: float,
-    rate_ca: float,
-    fee: float,
-) -> float:
+def triangle_profit(rate_ab: float, rate_bc: float, rate_ca: float, fee: float) -> float:
     """
-    Compute net profit % for A→B→C→A triangle.
-    rate_ab: how much B you get per unit of A (bid price of A/B pair or 1/ask of B/A)
-    rate_bc: how much C you get per unit of B
-    rate_ca: how much A you get per unit of C
-    Returns profit as a percentage (positive = profitable).
+    Net profit % for USDT → MID → QUOTE → USDT.
+    Exact formula: A_final = A_start × rate_ab × rate_bc × rate_ca × (1−fee)³
+    Returns profit as percentage; positive = profitable after all three fees.
     """
     gross = rate_ab * rate_bc * rate_ca
     net = gross * ((1 - fee) ** 3)
     return (net - 1) * 100
 
 
-async def retry_async(coro_fn, retries: int = 3, base_delay: float = 0.5, label: str = ""):
+# Errors Binance returns that are permanent — never retry these.
+# Retrying would place duplicate orders or waste time on definitively rejected orders.
+_NON_RETRYABLE_MESSAGES = frozenset([
+    "insufficient balance",
+    "insufficient funds",
+    "invalid quantity",
+    "lot size",
+    "min notional",
+    "permission denied",
+    "account suspended",
+    "api key",
+    "unauthorized",
+    "invalid symbol",
+])
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return not any(kw in msg for kw in _NON_RETRYABLE_MESSAGES)
+
+
+async def retry_async(coro_fn, retries: int = 3, base_delay: float = 0.3, label: str = ""):
+    """
+    Retry a coroutine on transient errors (network, rate-limit).
+    Raises immediately on permanent errors (insufficient funds, invalid order).
+    Delay doubles on each attempt: 0.3s → 0.6s → 1.2s.
+    """
     for attempt in range(retries):
         try:
             return await coro_fn()
         except Exception as e:
+            if not _is_retryable(e):
+                logger.error(f"[{label}] Non-retryable error — aborting: {e}")
+                raise
             if attempt == retries - 1:
                 raise
             delay = base_delay * (2 ** attempt)
-            logger.warning(f"[{label}] Attempt {attempt+1} failed: {e}. Retrying in {delay:.1f}s")
+            logger.warning(f"[{label}] Attempt {attempt + 1} failed: {e}. Retrying in {delay:.2f}s")
             await asyncio.sleep(delay)
 
 
