@@ -197,11 +197,13 @@ class ArbitrageBot:
                     asyncio.create_task(self.strategy.execute(best))
 
             self._scan_count += 1
-            # asyncio.sleep(0) yields to the event loop (lets WebSocket messages
-            # process) without any artificial delay — maximum scan throughput.
-            # The _has_new_data filter in scan() keeps CPU low by skipping
-            # triangles whose order books haven't changed since last evaluation.
-            await asyncio.sleep(0)
+            # 1ms sleep is enough to keep CPU usage healthy on a 1-vCPU VPS
+            # while still giving 1000 scan iterations per second. The bot is
+            # WebSocket-bound (market updates arrive at most ~100/sec per
+            # symbol), so faster scanning doesn't translate to faster trades.
+            # asyncio.sleep(0) hogged 96%+ CPU and starved the housekeeping
+            # loop on small VPSes.
+            await asyncio.sleep(0.001)
 
     async def _housekeeping_loop(self) -> None:
         while self._running:
