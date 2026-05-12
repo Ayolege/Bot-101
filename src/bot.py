@@ -229,7 +229,7 @@ class ArbitrageBot:
 
             stats = self.strategy.stats() if self.strategy else {}
             risk = self.risk.summary()
-            logger.debug(
+            logger.info(
                 f"[Bot] Heartbeat | scans={self._scan_count} | "
                 f"triangles={stats.get('triangles_active', 0)} | "
                 f"trades={stats.get('trades_executed', 0)} | "
