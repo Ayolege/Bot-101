@@ -1,5 +1,5 @@
 # Systemd service file — copy to /etc/systemd/system/arbbot.service on the VPS
-# Then run: sudo systemctl enable arbbot && sudo systemctl start arbbot
+# Then run: systemctl enable arbbot && systemctl start arbbot
 
 [Unit]
 Description=Binance Triangular Arbitrage Bot
@@ -8,9 +8,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/bot-101
-ExecStart=/home/ubuntu/bot-101/venv/bin/python main.py
+User=root
+WorkingDirectory=/root/bot-101
+ExecStart=/root/bot-venv/bin/python main.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
