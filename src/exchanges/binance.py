@@ -105,8 +105,11 @@ class BinanceExchange(BaseExchange):
         limited permissions) before the scan loop starts — fail fast.
         """
         try:
-            info = await self._exchange.fetch_account()
-            permissions = info.get("info", {}).get("permissions", [])
+            # ccxt-async exposes Binance's GET /api/v3/account via fetch_balance,
+            # which returns full account info including permissions and canTrade.
+            raw = await self._exchange.fetch_balance()
+            info = raw.get("info", {})
+            permissions = info.get("permissions", [])
             if permissions and "SPOT" not in permissions:
                 raise RuntimeError(
                     f"[Binance] API key does not have SPOT trading permission. "
@@ -114,7 +117,7 @@ class BinanceExchange(BaseExchange):
                     "Enable spot trading in Binance API management."
                 )
 
-            can_trade = info.get("info", {}).get("canTrade", True)
+            can_trade = info.get("canTrade", True)
             if not can_trade:
                 raise RuntimeError(
                     "[Binance] Account canTrade=False. Your account may be restricted. "
