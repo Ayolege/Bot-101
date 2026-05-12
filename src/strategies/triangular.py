@@ -59,11 +59,13 @@ class TriangularStrategy:
         triangles: List[TriangleMeta],
         config: dict,
         risk: RiskManager,
+        notifier=None,
     ):
         self.exchange = exchange
         self.triangles = triangles
         self.cfg = config
         self.risk = risk
+        self.notifier = notifier
 
         self.fee = config.get("fee_rate", 0.001)
         self.min_profit = config.get("min_profit_pct", 0.6)
@@ -288,6 +290,17 @@ class TriangularStrategy:
                 f"fees~{total_fees:.4f} USDT | "
                 f"session={self._total_profit:.4f} USDT"
             )
+
+            if self.notifier:
+                detail = (
+                    f"{m.path}\n"
+                    f"size: ${opp.trade_amount_usdt:.2f} | "
+                    f"fees: ${total_fees:.4f}\n"
+                    f"session: ${self._total_profit:+.4f}"
+                )
+                asyncio.create_task(
+                    self.notifier.alert_trade("triangular", net_profit, detail)
+                )
             return True
 
         except asyncio.TimeoutError:

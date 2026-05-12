@@ -169,6 +169,7 @@ class ArbitrageBot:
             triangles=triangles,
             config=tri_cfg,
             risk=self.risk,
+            notifier=self.notifier,
         )
         logger.info(
             f"[Bot] Ready — scanning {len(triangles)} triangles "
@@ -188,11 +189,11 @@ class ArbitrageBot:
                 if opportunities:
                     best = opportunities[0]
                     logger.info(f"[Bot] Opportunity: {best}")
-                    await self.notifier.alert_trade(
-                        "triangular", best.expected_profit_usdt, str(best)
-                    )
                     # create_task: non-blocking — scan continues immediately.
                     # The semaphore inside execute() enforces max_open_orders.
+                    # Telegram alert fires from inside execute() AFTER the
+                    # trade actually completes — alerting on every spotted
+                    # opportunity would spam the chat in volatile markets.
                     asyncio.create_task(self.strategy.execute(best))
 
             self._scan_count += 1
