@@ -197,13 +197,13 @@ class ArbitrageBot:
                     asyncio.create_task(self.strategy.execute(best))
 
             self._scan_count += 1
-            # 1ms sleep is enough to keep CPU usage healthy on a 1-vCPU VPS
-            # while still giving 1000 scan iterations per second. The bot is
-            # WebSocket-bound (market updates arrive at most ~100/sec per
-            # symbol), so faster scanning doesn't translate to faster trades.
-            # asyncio.sleep(0) hogged 96%+ CPU and starved the housekeeping
-            # loop on small VPSes.
-            await asyncio.sleep(0.001)
+            # 10ms sleep = 100 scan iterations/sec. The bot is WebSocket-bound:
+            # market data updates arrive faster than meaningful price changes,
+            # and the skip-unchanged filter already collapses no-op scans. On a
+            # 1-vCPU VPS this keeps CPU under ~30% with no loss of opportunity
+            # detection (price changes that matter persist far longer than
+            # 10ms). asyncio.sleep(0.001) was still pinning CPU near 100%.
+            await asyncio.sleep(0.01)
 
     async def _housekeeping_loop(self) -> None:
         while self._running:
